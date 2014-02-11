@@ -1,6 +1,6 @@
 package ejb.test;
 
-public interface EJBTestInterface 
+public interface EJBTestForwardInterface
 {
 	public int getData();
 	

@@ -1,9 +1,7 @@
 package ejb.container;
 
-import java.lang.annotation.Annotation;
 import java.lang.reflect.Field;
-import java.lang.reflect.InvocationTargetException;
-import java.lang.reflect.Method;
+import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Proxy;
 import java.util.HashMap;
 import java.util.Map;
@@ -11,23 +9,22 @@ import java.util.Set;
 
 import org.reflections.Reflections;
 import org.reflections.scanners.FieldAnnotationsScanner;
-import org.reflections.scanners.MethodAnnotationsScanner;
 
 import ejb.annotations.EJB;
-import ejb.annotations.Local;
-import ejb.annotations.PostConstruct;
+import ejb.annotations.PersistenceContext;
 import ejb.annotations.PreDestroy;
 import ejb.annotations.Singleton;
-import ejb.annotations.Statefull;
+import ejb.annotations.Stateful;
 import ejb.annotations.Stateless;
 import ejb.exceptions.EjbAllocationException;
 import ejb.exceptions.EjbInjectionException;
 import ejb.exceptions.InvokeAnnotatedMethodException;
 import ejb.exceptions.ManyInterfaceImplementationException;
 import ejb.exceptions.UnknowEjbMappingException;
+import ejb.exceptions.UnknowUnitNameException;
 
-public class EJBContainer {
-	
+public class EJBContainer 
+{
 	private static EJBContainer INSTANCE = null;
 	
 	public static EJBContainer getInstance() throws ManyInterfaceImplementationException
@@ -39,16 +36,22 @@ public class EJBContainer {
 	
 	private Map<Class<?>, Object> mSingletonInstances; // Map Singleton -> instance
 	private Map<Class<?>, Class<?>> mEjbImplementations; // Map Interface -> EJB
+	private DynamicHelper mDynamicHelper;
+	private ClientHolder mClientHolder;
+	private PersistenceFactory mPersistenceFactory;
 	
 	private EJBContainer() throws ManyInterfaceImplementationException
 	{
 		mSingletonInstances = new HashMap<Class<?>, Object>();
 		mEjbImplementations = new HashMap<Class<?>, Class<?>>();
+		mDynamicHelper = new DynamicHelper();
+		mClientHolder = new ClientHolder();
+		mPersistenceFactory = new PersistenceFactory();
 		
 		bootstrapInit() ;
 	}
 	
-	private void MapInterfacesToImplementations( Class<?> inClasse ) throws ManyInterfaceImplementationException
+	private void mapInterfacesToImplementations( Class<?> inClasse ) throws ManyInterfaceImplementationException
 	{
 		Class<?> interfaces[] = inClasse.getInterfaces();
 		for( Class<?> ejbInterface : interfaces )
@@ -65,148 +68,140 @@ public class EJBContainer {
 		
 		// Scan all classes of the class loader with annotations (Singleton, Statefull, Stateless)
 		Set<Class<?>> classes = reflections.getTypesAnnotatedWith(Singleton.class);
-		classes.addAll( reflections.getTypesAnnotatedWith(Statefull.class) );
+		classes.addAll( reflections.getTypesAnnotatedWith(Stateful.class) );
 		classes.addAll( reflections.getTypesAnnotatedWith(Stateless.class) );
 		for( Class<?> ejbInterface : classes )
 		{
-			MapInterfacesToImplementations( ejbInterface );
+			mapInterfacesToImplementations( ejbInterface );
 		}
+		
+		// Scan all classes that implements EntityManager
+		Set<Class<? extends EntityManager>> entityManagers = reflections.getSubTypesOf(EntityManager.class);
+		for( Class<? extends EntityManager> managerClass : entityManagers )
+		{
+			mPersistenceFactory.addPersistenceClass(managerClass.getSimpleName(), managerClass);
+			//Log.info("EJBContainer", "Find EntityManager: " + managerClass.getSimpleName());
+		}
+		
 	}
 	
-	public void inject( Object o ) throws Exception
-	{
-		// Manage @Stateless, @Statefull, @Singleton and @Local
-		//injectClassAnnotations( o );
-		
+	public void inject( Object inObject ) throws Exception
+	{		
 		// Scan all @EJB and inject EJB implementations
-		injectFieldAnnotations( o );
+		injectFieldAnnotations( inObject );
 	}
 	
-	public Object createProxyInstance( Class<?> inEJBClass ) throws InstantiationException, IllegalAccessException
+	public Object createProxyInstance( Class<?> inEJBClass, Object inClient ) throws InstantiationException, IllegalAccessException, EjbAllocationException, InvokeAnnotatedMethodException
 	{
-		/* Pour chaque classes EJB
-		 * On regarde ses interfaces
-		 * On associe interface -> class EJB
-		 * On injecte non pas l'instance de l'EJB mais un proxy sur celui-ci
-		 */
-		
-		Object bean = inEJBClass.newInstance();
-		Class<?>[] interfaces = inEJBClass.getInterfaces();
-		BeanHandler handler = new BeanHandler( bean );
-		Object proxy = Proxy.newProxyInstance( inEJBClass.getClassLoader(), interfaces, handler );
-		
-		return proxy;
+		Object bean = null;
+		// Manage stateful behavior
+		if(mDynamicHelper.classAnnotatedWith(inEJBClass, Stateful.class))
+		{
+			bean = mClientHolder.getClient(inClient).getBean(inEJBClass);
+		}
+		// Manage stateless behavior
+		else if(mDynamicHelper.classAnnotatedWith(inEJBClass, Stateless.class))
+		{
+			bean = BeanPool.getInstance().create(inEJBClass);
+		}
+		// Manage singleton behavior
+		else if(mDynamicHelper.classAnnotatedWith(inEJBClass, Singleton.class))
+		{
+			// If the instance of the singleton already exists, get it
+			if( mSingletonInstances.containsKey( inEJBClass ) )
+			{
+				bean = mSingletonInstances.get( inEJBClass );
+			}
+			else // Else, instantiate it in the map
+			{
+				bean = BeanPool.getInstance().create(inEJBClass);
+				mSingletonInstances.put( inEJBClass, bean );
+			}
+		}
+		return bean;
 	}
 	
-	public Object createEjbInstance( Class<?> inClass ) throws InvokeAnnotatedMethodException, EjbAllocationException
+	public Object createEjbInstance( Class<?> inClass, Object inClient ) throws InvokeAnnotatedMethodException, EjbAllocationException
 	{
 		Object object;
 		try {
-			object = createProxyInstance( inClass );
+			object = createProxyInstance( inClass, inClient );
 		} catch (InstantiationException | IllegalAccessException e) {
 			throw new EjbAllocationException( inClass );
 		}
 		
-		invokeAnnotatedMethods( object, PostConstruct.class );
 		return object;
 	}
 	
 	public void injectEJB( Object inObject, Field inField ) throws UnknowEjbMappingException, InvokeAnnotatedMethodException, EjbAllocationException, EjbInjectionException
 	{
-		Class<? extends Object> fieldClass = inField.getType();
+		// Search the implementation of the interface
+		Class<?> fieldClass = inField.getType();
 		if( mEjbImplementations.containsKey( fieldClass ) )
 			fieldClass = mEjbImplementations.get( fieldClass );
 		else
 			throw new UnknowEjbMappingException( fieldClass );
 		
-		Annotation[] typeAnnotations = fieldClass.getDeclaredAnnotations();
+		Object instance = createEjbInstance( fieldClass, inObject );
 		
-		Object instance = null;
-		for( Annotation typeAnnotation : typeAnnotations )
-		{
-			if( typeAnnotation instanceof Singleton )
-			{
-				// If the instance of the singleton already exists, get it
-				if( mSingletonInstances.containsKey( fieldClass ) )
-				{
-					instance = mSingletonInstances.get( fieldClass );
-				}
-				else // Else, instantiate it in the map
-				{
-					instance = createEjbInstance( fieldClass );
-					mSingletonInstances.put( fieldClass, instance );
-				}
-				break;
-			}
-		}
-		// If the field has not been initialized (with singleton annotation), initialize it
-		if( instance == null )
-		{
-			instance = createEjbInstance( fieldClass );
-		}
-		
+		// Inject the instance
 		try {
+			inField.setAccessible(true);
 			inField.set( inObject, instance );
 		} catch (IllegalArgumentException | IllegalAccessException e) {
 			throw new EjbInjectionException( inField );
 		}
 	}
 	
-	public void invokeAnnotatedMethods( Object inObject, Class<? extends Annotation> inAnnotation ) throws InvokeAnnotatedMethodException
+	public void injectPersistenceContext( Object inObject, Field inField ) throws InstantiationException, IllegalAccessException, UnknowUnitNameException, EjbInjectionException
 	{
-		// Retrieve all methods annotated with the given annotation
-		Reflections reflections = new Reflections( inObject.getClass().getName(), new MethodAnnotationsScanner() );
-		Set<Method> methods = reflections.getMethodsAnnotatedWith( inAnnotation );
-		
-		// Invoke them
-		for( Method method : methods )
-		{
-			try {
-				method.invoke( inObject, new Object[]{} );
-			} catch (IllegalAccessException | IllegalArgumentException
-					| InvocationTargetException e) {
-				throw new InvokeAnnotatedMethodException( method );
-			}
+		PersistenceContext annotation = inField.getAnnotation(PersistenceContext.class);
+		EntityManager manager = mPersistenceFactory.get(annotation.unitName());
+
+		try {
+			inField.set( inObject, manager );
+		} catch (IllegalArgumentException | IllegalAccessException e) {
+			throw new EjbInjectionException( inField );
 		}
+		
 	}
 	
-	public void injectFieldAnnotations( Object o ) throws UnknowEjbMappingException, InvokeAnnotatedMethodException, EjbAllocationException, EjbInjectionException
+	public void injectFieldAnnotations(Object inObject) throws UnknowEjbMappingException, InvokeAnnotatedMethodException, EjbAllocationException, EjbInjectionException, InstantiationException, IllegalAccessException, UnknowUnitNameException
 	{
-		Class<? extends Object> objectClass = o.getClass();
+		if(inObject instanceof Proxy)
+		{
+			InvocationHandler handler = Proxy.getInvocationHandler(inObject);
+			if( handler instanceof BeanHandler )
+			{
+				BeanHandler beanHandler = (BeanHandler)handler;
+				inObject = beanHandler.getBean();
+			}
+		}
 		
+		Class<? extends Object> objectClass = inObject.getClass();
+		
+		// Search all fields annotated with @EJB
         Reflections reflections = new Reflections( objectClass.getName(), new FieldAnnotationsScanner()) ;
 		Set<Field> fields = reflections.getFieldsAnnotatedWith( EJB.class );
 
+		// Inject them all
 		for( Field field : fields )
 		{
-			injectEJB( o, field );
+			injectEJB( inObject, field );
+		}
+		
+		// Search all fields annotated with @PersistenceContext
+		fields = reflections.getFieldsAnnotatedWith( PersistenceContext.class );
+
+		// Inject them all
+		for( Field field : fields )
+		{
+			injectPersistenceContext( inObject, field );
 		}
 	}
 	
 	public void deleteEJB( Object inObject ) throws InvokeAnnotatedMethodException
 	{
-		invokeAnnotatedMethods( inObject, PreDestroy.class );
-	}
-	
-	public void injectClassAnnotations( Class<? extends Object> type )
-	{
-		Annotation[] annotations = type.getDeclaredAnnotations();
-		
-		for( Annotation annotation : annotations )
-		{
-			if( annotation instanceof Stateless )
-			{
-				
-			}
-			else if( annotation instanceof Local )
-			{
-				
-			}
-		}
-	}
-	
-	public void injectClassSingleton( Class<? extends Object> type )
-	{
-		
+		mDynamicHelper.invokeAnnotatedMethods( inObject, PreDestroy.class );
 	}
 }

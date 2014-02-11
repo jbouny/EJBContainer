@@ -3,66 +3,145 @@ package ejb.container;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
-import java.util.Collection;
+
+import ejb.annotations.TransactionAttribute;
+import ejb.logger.Log;
 
 public class BeanHandler implements InvocationHandler 
 {
-	public BeanHandler(Object inObject)
-	{
-		m_Bean = inObject;
-		m_BeanClass = inObject.getClass();
-	}
-	
     // EJB bean instance
-    private Object m_Bean;
+    private Object mBean;
 	
     // EJB bean class
-    private final Class<?> m_BeanClass;
+    private Class<?> mBeanClass;
+    
+    private static UserTransaction mUserTransaction = new UserTransaction();
+    
+    Transaction mTransaction = null;
+    
+    TransactionAttribute.Type mClassTransaction;
+    
+	public BeanHandler(Object inBean)
+	{
+		setBean(inBean);
+	}
 	
-    private Object invokeBeanMethod(final Collection<EntityManager> ems, final Method method, Object[] arguments) throws IllegalAccessException, IllegalArgumentException, InvocationTargetException 
+	private void beginInvoke(TransactionAttribute.Type inTransactionType)
+	{
+		//Log.info("BeanHandler", "Pre invoke with " + inTransactionType.toString() + " Transaction");
+		switch(inTransactionType)
+		{
+		case NEVER:
+			break;
+			
+		case REQUIRED:
+			if(!mUserTransaction.hasOne())
+			{
+				mTransaction = new Transaction(mBean);
+				mTransaction.begin();
+				mUserTransaction.push(mTransaction);
+			}
+			break;
+			
+		case REQUIRES_NEW:
+			mUserTransaction.sleep();
+			mTransaction = new Transaction(mBean);
+			mTransaction.begin();
+			mUserTransaction.push(mTransaction);
+			break;
+		}
+	}
+	
+	private void endInvoke(TransactionAttribute.Type inTransactionType)
+	{
+		//Log.info("BeanHandler", "Post invoke with " + inTransactionType.toString() + " Transaction");
+		switch(inTransactionType)
+		{
+		case NEVER:
+			break;
+			
+		case REQUIRED:
+			if(mTransaction != null && mUserTransaction.first() == mTransaction)
+				mUserTransaction.pop().end();
+			break;
+			
+		case REQUIRES_NEW:
+			mUserTransaction.pop().end();
+			if(mUserTransaction.hasOne())
+				mUserTransaction.awake();
+			break;
+		}
+	}
+	
+	private TransactionAttribute.Type getTransactionAttribute(Method inMethod) throws NoSuchMethodException, SecurityException
+	{
+		// Retrieve the original method
+		Class<?>[] params = inMethod.getParameterTypes();
+		Method beanMethod = mBeanClass.getMethod(inMethod.getName(), (params.length > 0 ? params : null));
+		TransactionAttribute methodAttribute = beanMethod.getAnnotation(TransactionAttribute.class);
+    	
+		// Extract the current transaction attribute
+		if( methodAttribute == null )
+    		return mClassTransaction;
+    	else
+    		return methodAttribute.value();
+	}
+	
+    private Object invokeBeanMethod(Method inMethod, Object[] inArguments) throws IllegalAccessException, IllegalArgumentException, InvocationTargetException 
     {
-		/*if (transactionField == null) 
-		{
-		    //BeanTransactions.addTransaction(this, method, ems);
-		} else 
-		{
-		    //setTransactionField(ems);
-		}*/
-	
-		// Calls interceptors for this method or bean instance
-		//Object[] intercepteds = callInterceptors(method, arguments);
-	
-		// Calls for bean method with "intercepted" parameters
-		Object value = method.invoke(m_Bean, arguments);
+    	Log.info("BeanHandler", "Invoke method [begin] " + inMethod.getName());
+		Object value = inMethod.invoke(mBean, inArguments);
+    	Log.info("BeanHandler", "Invoke method [end] " + inMethod.getName());
 	
 		return value;
     }
 
 	@Override
-	public Object invoke(Object proxy, Method method, Object[] arguments) throws Throwable 
+	public Object invoke(Object inPoxy, Method inMethod, Object[] inArguments) throws Throwable 
 	{
 		Object value;
 
-		//Collection<EntityManager> ems = createEntityManagers();
 		Method realMethod = null;
-		try 
-		{
-		    String methodName = method.getName();
-		    Class<?>[] parameterTypes = method.getParameterTypes();
+		
+	    // Gets real method of bean class
+	    String methodName = inMethod.getName();
+	    Class<?>[] parameterTypes = inMethod.getParameterTypes();
+	    realMethod = mBeanClass.getDeclaredMethod(methodName, parameterTypes);
 
-		    // Gets real method of bean class
-		    realMethod = m_BeanClass.getDeclaredMethod(methodName, parameterTypes);
-		    value = invokeBeanMethod(null, realMethod, arguments);
-		} catch (Throwable th) 
+	    // Manage begin of transaction
+	    TransactionAttribute.Type transactionType = getTransactionAttribute(inMethod);
+    	beginInvoke(transactionType);
+    	
+	    try
+	    {
+		    // Invoke it
+		    value = invokeBeanMethod(realMethod, inArguments);
+	    } 
+	    catch (Exception e) 
 		{
-		    //rollback(realMethod);
-		    throw new Throwable(th);
-		} finally 
-		{
-		    //close(realMethod);
+		    throw e;
 		}
-
+	    finally 
+		{
+		    // Manage end of transaction
+	    	endInvoke(transactionType);
+		}
+	    
 		return value;
 	}
-
+	
+	public void setBean(Object inBean) {
+		mBean = inBean;
+		mBeanClass = inBean.getClass();
+		
+		TransactionAttribute classTransaction = mBeanClass.getAnnotation(TransactionAttribute.class);
+		if(classTransaction == null)
+			mClassTransaction = TransactionAttribute.Type.NEVER;
+		else
+			mClassTransaction = classTransaction.value();
+	}
+	
+	public Object getBean() {
+		return mBean;
+	}
 }

@@ -6,7 +6,12 @@ import java.lang.annotation.RetentionPolicy;
 import java.lang.annotation.Target;
 
 @Retention(RetentionPolicy.RUNTIME)
-@Target(ElementType.FIELD)
-public @interface PersistenceContext {
-	String unitName();
+@Target(value={ElementType.METHOD,ElementType.TYPE})
+public @interface TransactionAttribute {
+	enum Type {
+		REQUIRED,
+		REQUIRES_NEW,
+		NEVER
+	};
+	Type value();
 }

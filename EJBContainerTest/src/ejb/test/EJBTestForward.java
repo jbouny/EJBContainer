@@ -1,23 +1,25 @@
 package ejb.test;
 
+import ejb.annotations.EJB;
 import ejb.annotations.Singleton;
 import ejb.annotations.TransactionAttribute;
 import ejb.annotations.TransactionAttribute.Type;
 
 @Singleton
-public class EJBTest implements EJBTestInterface 
+public class EJBTestForward implements EJBTestForwardInterface 
 {
-	private int mData;
+	@EJB
+	EJBTestInterface ejb;
 	
 	@TransactionAttribute(value=Type.REQUIRES_NEW)
 	public int getData()
 	{
-		return mData;
+		return ejb.getData();
 	}
 
 	@TransactionAttribute(value=Type.REQUIRED)
 	public void setData(int inData)
 	{
-		mData = inData;
+		ejb.setData(inData);
 	}
 }

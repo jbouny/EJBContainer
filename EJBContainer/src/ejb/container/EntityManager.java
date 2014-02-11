@@ -1,21 +1,24 @@
 package ejb.container;
 
-public interface EntityManager {
-	/*void clear();
+public interface EntityManager 
+{
+	void clear();
 	
-	void close();
-	
-	void detach();
+	boolean contains( Object inEntity ); 
 	
 	void flush();
-	
-	boolean isOpen();
-	
-	void joinTransaction();
 	
 	<T> void merge( T inEntity );
 	
 	void persist( Object inObject );
 	
-	void remove( Object inObject );*/ 
+	void remove( Object inObject );
+	
+	void close();
+	
+	void detach();
+	
+	boolean isOpen();
+	
+	void joinTransaction();
 }
